@@ -1,0 +1,396 @@
+---
+title: "ANCOM-BC - differential analysis"
+author: "Colleen Kellogg"
+date: "02/02/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r packages}
+#BiocManager::install("ALDEx2")
+#BiocManager::install("phyloseq")
+library(phyloseq)
+library(ALDEx2)
+library(data.table)
+library(nlme)
+library(compositions)
+library(ggplot2)
+library(tidyverse)
+#source("ANCOM-master/scripts/ancom_v2.1.R")
+library(ANCOMBC) #use ANCOM-BC instead of ANCOM v2 
+library(gridExtra)
+library(cowplot)
+library(scales)
+library(ampvis2)
+
+```
+
+We will employ two different methods to test for differential abundance. See: https://www.nature.com/articles/s41467-022-28034-z.pdf
+
+
+```{r load data}
+#this inputs are from after running decontam and removing contaminant ASVs and filtering samples that have very low reads / sample
+
+asvfile <-read.csv("filtered_seastar_asvtable.csv", row.names=1, header = TRUE) #asv table exported from qiime2; note : if you reading the file as a table / .tsv file the early calvert samples (which have numeric IDs, are lost when creating phyloseq object. when you read in the file as a CSV, R puts an X in front of these and thus they are read into phyloseq just fine).
+taxfile <-as.matrix(read.csv("filtered_seastar_taxatable.csv",row.names=1,header = TRUE)) # taxonomy file, this includes chloroplasts 
+
+mapfile <-read.csv("filtered_seastar_metadata.csv",row.names = 1, header=TRUE)
+
+```
+
+
+```{r make phyloseq object}
+
+OTU = otu_table(asvfile, taxa_are_rows = TRUE)
+TAX = tax_table(taxfile)
+MAP = sample_data(mapfile)
+
+seastar_filt <- merge_phyloseq(OTU, TAX, MAP)
+
+seastar_sums <- data.table(as(sample_data(seastar_filt), "data.frame"),
+                 TotalReads = sample_sums(seastar_filt), keep.rownames = TRUE)
+
+min(seastar_sums$TotalReads) #19131
+mean(seastar_sums$TotalReads) #297572.3
+median(seastar_sums$TotalReads) #287589
+
+#some samples have very low reads, in the range of the negatives and these match with the real samples that plot with the extraction negatives, after decontamination.
+
+#quick and dirty plot to make sure everything looks reasonable
+pcoa_all<-ordinate(seastar_filt, method = "PCoA")
+nmds_all<-ordinate(seastar_filt, method = "NMDS", try = 100) #have to up the number of interations from the default to get it to work
+plot_ordination(seastar_filt, pcoa_all, color = "ExtractionKit", shape = "Species") + scale_color_viridis_d() + theme_classic()
+
+plot_ordination(seastar_filt, pcoa_all, color = "Species") + geom_text(aes(label=row.names(sample_data(seastar_filt))), hjust=-0.25, vjust=0.5, size = 2) + theme_classic() + scale_color_manual(values = c("tomato1","slateblue3")) #interesting - do things look different in this ordination after filtering out contaminants? need to check carolyn's manuscript. maybe those are just the sames that didn't work well...
+
+# this is now done in our other markdown before getting to this point #
+#we looked more closely at the samples that grouped with the negatives and found they they all had very load read counts, before and esp after the culling of the contaminant ASVs. therefore, these samples do not seem signficantly different than the negatives and did not sequence successfully. each had quite low DNA concentrations before pooling (not much different than the extraction negatives). So, we are going to cull these low-read samples (considering the mean is 200369.5...less than 7000 is clearly an outlier and not reliable)
+
+#=seastar_filt_clean<-prune_samples(sample_sums(seastar_filt) > 9000, seastar_filt)
+```
+
+
+#ANCOM-BC reported to work well for >2 group comparisons and we will use this. The main challenge is that it does not perform all pairwise comparisons; everything has to be relative to a control/set of samples. For this we use a kit (PowerSoil) previously used in our lab for the swab samples but is discontinued now. Need to continue to investigate an all vs all solution.
+
+For this study, we are interested in uncovering differences at a higher taxonomic level rather than at the ASV level so first we agglomerate the data to phylum.
+
+```{r ancombc by sea star species}
+
+phylum_data = tax_glom(seastar_filt, "Phylum")
+phylum_table<-data.frame(otu_table(phylum_data))
+phylum.tax<-data.frame(tax_table(phylum_data))
+phylum.tax<-rownames_to_column(phylum.tax, var = "ASVID")
+
+bcout = ancombc(phyloseq = phylum_data, formula = "Species", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 1000, 
+              group = "Species", struc_zero = TRUE, neg_lb = FALSE, tol = 1e-5, 
+              max_iter = 1000, conserve = TRUE, alpha = 0.05, global = TRUE)
+res1 = bcout$res
+ss_da_ancom<-res1$diff_abn %>% rename("isda" = "SpeciesPisaster ochraceus") #save a logical data.frame. TRUE if the taxon has q_val less than alpha.
+ss_w_ancom<-res1$W %>% rename("W" = "SpeciesPisaster ochraceus") # save W, a data.frame of test statistics. W = beta/se.
+
+ss_b_ancom<-res1$beta %>% rename("beta" = "SpeciesPisaster ochraceus") # save W, a data.frame of test statistics. W = beta/se.
+
+
+
+#make some summary tables
+ss_da<-rownames_to_column(ss_da_ancom, var = "ASVID")
+ss_w<-rownames_to_column(ss_w_ancom, var = "ASVID")
+ss_b<-rownames_to_column(ss_b_ancom, var = "ASVID")
+ss_res<-left_join(ss_da, ss_w)
+ss_res<-left_join(ss_res, ss_b)
+ss_da_ancom.phy<-left_join(ss_res,phylum.tax[1:3])
+
+#### Top phyla across dataset ####
+ss_da_ancomTOP.phy<-left_join(ss_res,phylum.tax[1:3]) %>% 
+  filter(Phylum != "NA" & Phylum != "RCP2-54" & Phylum != "MBNT15" & Phylum != "Latescibacterota" & Phylum != "Crenarchaeota" & Phylum != "WPS-2" & Phylum != "Nitrospirota" & Phylum != "Calditrichota" & Phylum != "Fusobacteriota" & Phylum != "Gemmatimonadota" & Phylum != "Cloacimonadota" & Phylum != "Sva0485" & Phylum != "NB1-j" & Phylum != "Marinimicrobia_(SAR406_clade)" & Phylum != "SAR324_clade(Marine_group_B)"& Phylum != "Deinococcota" & Phylum != "Nanoarchaeota") 
+
+ss_da_ancomTOP.phy$PhylumTOP <- factor(ss_da_ancomTOP.phy$Phylum, levels = c("Chloroflexi","Acidobacteriota","Firmicutes","Myxococcota","Patescibacteria","Campylobacterota","Actinobacteriota","Cyanobacteria","Planctomycetota","Desulfobacterota","Bdellovibrionota","Verrucomicrobiota","Bacteroidota","Spirochaetota","Proteobacteria"))
+
+
+sp.top.bplot<-ggplot(ss_da_ancomTOP.phy, aes(x = beta, y = PhylumTOP, color = isda)) + geom_point() + scale_color_manual(values = c("Black","Red") ) + labs(color = "Significant", x = "Log fold change") + geom_vline(xintercept=0, linetype="dotted") + theme_classic() + theme(axis.text.y = element_blank(), legend.position="bottom", axis.title.y = element_blank(), legend.text = element_text(size = 8), legend.title = element_text(size = 8), axis.text.x = element_text(size = 8))
+
+sp.top.wplot<-ggplot(ss_da_ancomTOP.phy, aes(x = W, y = PhylumTOP, color = isda)) + geom_point() + scale_color_manual(values = c("Black","Red") ) + labs(color = "Significant", x = "W (Test statistic)") + geom_vline(xintercept=0, linetype="dotted") + theme_classic() + theme(axis.text.y = element_blank(), legend.position="bottom", axis.title.y = element_blank(), legend.text = element_text(size = 8), legend.title = element_text(size = 8), axis.text.x = element_text(size = 8))
+
+
+#### same as above, all phyla ####
+
+ss_da_ancom.phy$Phylum <- factor(ss_da_ancom.phy$Phylum, levels = rev(c("Proteobacteria","Spirochaetota","Bacteroidota","Verrucomicrobiota","Bdellovibrionota","Desulfobacterota","Planctomycetota","Cyanobacteria","Actinobacteriota","Campylobacterota","Patescibacteria","Myxococcota","Firmicutes","Acidobacteriota","Chloroflexi","Crenarchaeota","Fusobacteriota","NB1-j","Nitrospirota","Latescibacterota","Nanoarchaeota","Gemmatimonadota","Sva0485","WPS-2","Marinimicrobia_(SAR406_clade)","Calditrichota","SAR324_clade(Marine_group_B)","Deinococcota","Cloacimonadota")))
+
+#or just make a order vector
+orderall=c("Proteobacteria","Spirochaetota","Bacteroidota","Verrucomicrobiota","Bdellovibrionota","Desulfobacterota","Planctomycetota","Cyanobacteria","Actinobacteriota","Campylobacterota","Patescibacteria","Myxococcota","Firmicutes","Acidobacteriota","Chloroflexi","Crenarchaeota","Fusobacteriota","NB1-j","Nitrospirota","Latescibacterota","Nanoarchaeota","Gemmatimonadota","Sva0485","WPS-2","Marinimicrobia_(SAR406_clade)","Calditrichota","SAR324_clade(Marine_group_B)","Deinococcota","Cloacimonadota")
+
+sp.wplot<-ggplot(ss_da_ancom.phy, aes(x = W, y = Phylum, color = isda)) + geom_point() + scale_color_manual(values = c("Black","Red") ) + labs(color = "Significant") + geom_vline(xintercept=0, linetype="dotted") + theme_classic() + theme(legend.position="bottom", axis.text.y = element_blank(), axis.title.y = element_blank(), axis.text.x = element_text(size = 8), axis.title.x = element_text(size = 10)) 
+
+sp.bplot<-ggplot(ss_da_ancom.phy, aes(x = beta, y = Phylum, color = isda)) + geom_point() + scale_color_manual(values = c("Black","Red") ) + labs(color = "Significant", x = "Log fold change") + geom_vline(xintercept=0, linetype="dotted") + theme_classic() + theme(legend.position="bottom", axis.text.y = element_blank(), axis.title.y = element_blank(), axis.text.x = element_text(size = 8), axis.title.x = element_text(size = 10)) 
+
+#heatmaps to pair with ancombc results
+source("phyloseq_to_ampvis2.R") #you can get this here: https://kasperskytte.github.io/ampvis2/articles/faq.html ... well actually here https://gist.github.com/KasperSkytte/8d0ca4206a66be7ff6d76fc4ab8e66c6
+
+ss_amp <- phyloseq_to_ampvis2(phylum_data)
+
+ss_amp$metadata$ExtractionKitAbb <- factor(ss_amp$metadata$ExtractionKitAbb, levels = c("Q.PSO", "Q.BT","Q.BTQ","Q.PSP","ZYMO"))
+
+ss_heatmap_top<- amp_heatmap(
+  ss_amp,
+  group_by = "ExtractionKitAbb", 
+  facet_by = "SeastarSpecies", 
+  plot_values_size = 2, 
+  tax_show = 15,
+  showRemainingTaxa = FALSE,
+  round = 2,
+  min_abundance = 0.001,
+  color_vector = c("#A6CEE3", "whitesmoke","#E31A1C"))
+
+ss_hm_top<-ss_heatmap_top + theme_classic() + theme(legend.position = "bottom", legend.text = element_text(size = 8), legend.title = element_text(size =8), axis.text.x = element_text(angle = 30, hjust = 1, size = 8)) + labs(fill = "% Read \n Abun.", x = "Extraction Kit") + guides(fill = guide_colourbar(barheight = 1))
+
+#ggsave("ss_top15phyla_hmw.pdf", ss_hm_top, width = 8, height = 6, units = "in")
+
+ss_top_resplots <- plot_grid(ss_hm_top, sp.top.bplot, align = "h", axis = "bt", rel_widths = c(1, 0.5))
+
+#ggsave("ss_top15phyla_resplots.pdf", ss_top_resplots, width = 8, height = 5, units = "in")
+
+
+ss_heatmap_all<- amp_heatmap(
+  ss_amp,
+  group_by = "ExtractionKitAbb", 
+  facet_by = "SeastarSpecies", 
+  plot_values_size = 2, 
+  tax_show = 29,
+  showRemainingTaxa = FALSE,
+  round = 3,
+  min_abundance = 0.001,
+  color_vector = c("#A6CEE3", "whitesmoke","#E31A1C"))
+
+ss_hm_all<-ss_heatmap_all + theme_classic() + theme(legend.position = "bottom", legend.text = element_text(size = 8), legend.title = element_text(size =8), axis.text.x = element_text(angle = 30, hjust = 1, size = 8), axis.title.x = element_text(size = 10)) + labs(fill = "% Read \n Abun.", x = "Extraction Kit") + guides(fill = guide_colourbar(barheight = 1))
+
+#ggsave("ss_allphyla_hmw.pdf", ss_hm_all, width = 8, height = 6, units = "in")
+
+ss_all_resplots <- plot_grid(ss_hm_all, sp.bplot, align = "h", axis = "bt", rel_widths = c(1, 0.5))
+
+#ggsave("ss_allphyla_resplots.pdf", ss_all_resplots, width = 8, height = 5, units = "in")
+
+
+```
+
+
+To match with betta test (https://github.com/adw96/DivNet) we also ran for this dataset, lets compare compositions among kits, with sea star species as a fixed effect. These are the figures we use in the paper - Figure 4.
+
+```{r ancombc by kit and species}
+
+out.kss = ancombc(phyloseq = phylum_data, formula = "KitOrder*Species", 
+              p_adj_method = "holm", zero_cut = 0.90, lib_cut = 9000, 
+              group = "KitOrder", struc_zero = TRUE, neg_lb = FALSE, tol = 1e-5, 
+              max_iter = 100, conserve = TRUE, alpha = 0.05, global = TRUE)
+
+res.kss = out.kss$res
+res.kss.global = out.kss$res_global
+res.kss.global.temp<-rownames_to_column(res.kss.global, var = "ASVID")
+
+kss_da_ancom<-res.kss$diff_abn
+kss_w_ancom<-res.kss$W
+kss_b_ancom<-res.kss$beta
+kss_da<-rownames_to_column(kss_da_ancom, var = "ASVID")
+kss_w<-rownames_to_column(kss_w_ancom, var = "ASVID")
+kss_b<-rownames_to_column(kss_b_ancom, var = "ASVID")
+
+#summary table for if a phyla is differentially abundant
+
+#test stat
+kss_da_ancom.phy<-left_join(kss_da,phylum.tax[1:3]) %>% relocate("Phylum", .after = "ASVID")
+
+kss_da.temp <- melt(kss_da_ancom.phy, id.vars=c("ASVID", "Phylum", "Domain"), variable.name = "Comparison", value.name = "diff_abun")
+
+kss_da.temp$Species <- kss_da.temp$Comparison
+
+kss_da_summary<-kss_da.temp %>% mutate(Species = recode(Species, 'KitOrderB' = 'Dermasterias', 'KitOrderC' = 'Dermasterias', 'KitOrderD' = 'Dermasterias', 'KitOrderE' = 'Dermasterias', 'SpeciesPisaster ochraceus' = 'Derm-Pis', 'KitOrderB:SpeciesPisaster ochraceus' = 'Pisaster', 'KitOrderC:SpeciesPisaster ochraceus' = 'Pisaster', 'KitOrderD:SpeciesPisaster ochraceus' = 'Pisaster', 'KitOrderE:SpeciesPisaster ochraceus' = 'Pisaster'))
+
+kss_da_summary<-kss_da_summary %>% mutate(Comparison = recode(Comparison, 'KitOrderB' = 'Q.BT-Q.PSO', 'KitOrderC' = 'Q.BTQ-Q.PSO', 'KitOrderD' = 'Q.PSP-Q.PSO', 'KitOrderE' = 'ZYMO-Q.PSO', 'SpeciesPisaster ochraceus' = 'Derm-Pis', 'KitOrderB:SpeciesPisaster ochraceus' = 'Q.BT-Q.PSO', 'KitOrderC:SpeciesPisaster ochraceus' = 'Q.BTQ-Q.PSO', 'KitOrderD:SpeciesPisaster ochraceus' = 'Q.PSP-Q.PSO', 'KitOrderE:SpeciesPisaster ochraceus' = 'ZYMO-Q.PSO'))
+
+
+
+#summary table for test statistic, w
+
+
+kss_w_ancom.phy<-left_join(kss_w, phylum.tax[1:3]) %>% relocate("Phylum", .after = "ASVID")
+
+kss_w.temp <- melt(kss_w_ancom.phy, id.vars=c("ASVID", "Phylum", "Domain"), variable.name = "Comparison", value.name = "w")
+
+kss_w.temp$Species <- kss_w.temp$Comparison
+
+
+kss_w_summary<-kss_w.temp %>% mutate(Species = recode(Species, 'KitOrderB' = 'Dermasterias', 'KitOrderC' = 'Dermasterias', 'KitOrderD' = 'Dermasterias', 'KitOrderE' = 'Dermasterias', 'SpeciesPisaster ochraceus' = 'Derm-Pis', 'KitOrderB:SpeciesPisaster ochraceus' = 'Pisaster', 'KitOrderC:SpeciesPisaster ochraceus' = 'Pisaster', 'KitOrderD:SpeciesPisaster ochraceus' = 'Pisaster', 'KitOrderE:SpeciesPisaster ochraceus' = 'Pisaster'))
+
+kss_w_summary<-kss_w_summary %>% mutate(Comparison = recode(Comparison, 'KitOrderB' = 'Q.BT-Q.PSO', 'KitOrderC' = 'Q.BTQ-Q.PSO', 'KitOrderD' = 'Q.PSP-Q.PSO', 'KitOrderE' = 'ZYMO-Q.PSO', 'SpeciesPisaster ochraceus' = 'Derm-Pis', 'KitOrderB:SpeciesPisaster ochraceus' = 'Q.BT-Q.PSO', 'KitOrderC:SpeciesPisaster ochraceus' = 'Q.BTQ-Q.PSO', 'KitOrderD:SpeciesPisaster ochraceus' = 'Q.PSP-Q.PSO', 'KitOrderE:SpeciesPisaster ochraceus' = 'ZYMO-Q.PSO'))
+
+kss_wda_summary <- left_join(kss_da_summary,kss_w_summary)
+
+#log fold change summary
+
+kss_b_ancom.phy<-left_join(kss_b, phylum.tax[1:3]) %>% relocate("Phylum", .after = "ASVID")
+
+kss_b.temp <- melt(kss_b_ancom.phy, id.vars=c("ASVID", "Phylum", "Domain"), variable.name = "Comparison", value.name = "LFC")
+
+kss_b.temp$Species <- kss_b.temp$Comparison
+
+
+kss_b_summary<-kss_b.temp %>% mutate(Species = recode(Species, 'KitOrderB' = 'Dermasterias', 'KitOrderC' = 'Dermasterias', 'KitOrderD' = 'Dermasterias', 'KitOrderE' = 'Dermasterias', 'SpeciesPisaster ochraceus' = 'Derm-Pis', 'KitOrderB:SpeciesPisaster ochraceus' = 'Pisaster', 'KitOrderC:SpeciesPisaster ochraceus' = 'Pisaster', 'KitOrderD:SpeciesPisaster ochraceus' = 'Pisaster', 'KitOrderE:SpeciesPisaster ochraceus' = 'Pisaster'))
+
+kss_b_summary<-kss_b_summary %>% mutate(Comparison = recode(Comparison, 'KitOrderB' = 'Q.BT-Q.PSO', 'KitOrderC' = 'Q.BTQ-Q.PSO', 'KitOrderD' = 'Q.PSP-Q.PSO', 'KitOrderE' = 'ZYMO-Q.PSO', 'SpeciesPisaster ochraceus' = 'Derm-Pis', 'KitOrderB:SpeciesPisaster ochraceus' = 'Q.BT-Q.PSO', 'KitOrderC:SpeciesPisaster ochraceus' = 'Q.BTQ-Q.PSO', 'KitOrderD:SpeciesPisaster ochraceus' = 'Q.PSP-Q.PSO', 'KitOrderE:SpeciesPisaster ochraceus' = 'ZYMO-Q.PSO'))
+
+kss_summary <- left_join(kss_da_summary,kss_b_summary)
+
+
+kss_summary$Phylum <- factor(kss_summary$Phylum, levels = rev(orderall))
+
+kss_derm_plot<-ggplot(kss_summary[kss_summary$Species == "Dermasterias",], aes(x = LFC, y = Phylum, color = diff_abun)) + geom_point() + scale_color_manual(values = c("Black","Red")) + theme_classic() + theme(legend.position = "none", axis.text.x = element_text(size = 8), axis.title.x = element_text(size = 10), strip.text.x = element_text(size = 8), panel.border = element_rect(size = 0.5, fill = NA, color = "black")) + labs(color = "Significant", x = "Log fold change") + guides(color = guide_legend(nrow = 2)) + facet_grid(~Comparison)
+
+#no labels
+
+kss_derm_plotnl <- ggplot(kss_summary[kss_summary$Species == "Dermasterias",], aes(x = LFC, y = Phylum, color = diff_abun)) + geom_point() + scale_color_manual(values = c("Black","Red")) + theme_classic() + theme(legend.position = "bottom", axis.text.x = element_text(size = 8), axis.title.x = element_text(size = 10), axis.text.y = element_blank(), axis.title.y = element_blank(), strip.text.x = element_text(size = 8), panel.border = element_rect(size = 0.5, fill = NA, color = "black")) + labs(color = "Significant", x = "Log fold change") + geom_vline(xintercept=0, linetype="dotted") + facet_grid(~Comparison)
+
+#derm heatmap
+
+derm<-subset_samples(phylum_data, Species != "Pisaster ochraceus")
+
+derm_amp<-phyloseq_to_ampvis2(derm)
+
+
+derm_heatmap_all<- amp_heatmap(
+  derm_amp,
+  group_by = "ExtractionKitAbb", 
+  plot_values_size = 2, 
+  tax_show = 29,
+  showRemainingTaxa = FALSE,
+  round = 3,
+  order_y_by = rev(orderall),
+  order_x_by = c("Q.PSO","Q.BT","Q.BTQ","Q.PSP","ZYMO"),
+  min_abundance = 0.001,
+  color_vector = c("#A6CEE3", "whitesmoke","#E31A1C"))
+
+#Figure 4A
+derm_hm_all <- derm_heatmap_all + theme_classic() + theme(legend.position = "bottom", legend.text = element_text(size = 8), legend.title = element_text(size =8), axis.text.x = element_text(angle = 30, hjust = 1, size = 8), plot.title = element_text(size = 10)) + labs(fill = "% Read \n Abun.", x = "Extraction Kit") + guides(fill = guide_colourbar(barheight = 1)) + ggtitle("A. Dermasterias imbricata")
+
+derm_kssresults_plots_all <-plot_grid(derm_hm_all,kss_derm_plotnl, align = "h", axis = "bt", rel_widths = c(1.5, 1.5))
+
+# ggsave("derm_kssresults_plots_all.pdf", derm_kssresults_plots_all, width = 8, height = 5, units = "in")
+
+#Pisaster plots
+
+kss_pis_plot<-ggplot(kss_summary[kss_summary$Species == "Pisaster",], aes(x = LFC, y = Phylum, color = diff_abun)) + geom_point() + scale_color_manual(values = c("Black","Red")) + theme_classic() + theme(legend.position = "none", axis.text.x = element_text(size = 8), axis.title.x = element_text(size = 10), strip.text.x = element_text(size = 8), panel.border = element_rect(size = 0.5, fill = NA, color = "black")) + labs(color = "Significant", x = "Log fold change") + guides(color = guide_legend(nrow = 2)) + facet_grid(~Comparison)
+
+#no labels
+kss_pis_plotnl <- ggplot(kss_summary[kss_summary$Species == "Pisaster",], aes(x = LFC, y = Phylum, color = diff_abun)) + geom_point() + scale_color_manual(values = c("Black","Red")) + theme_classic() + theme(legend.position = "bottom", axis.text.x = element_text(size = 8), axis.title.x = element_text(size = 10), axis.text.y = element_blank(), axis.title.y = element_blank(), strip.text.x = element_text(size = 8), panel.border = element_rect(size = 0.5, fill = NA, color = "black")) + labs(color = "Significant", x = "Log fold change") + geom_vline(xintercept=0, linetype="dotted") + facet_grid(~Comparison)
+
+pisall<-subset_samples(phylum_data, Species == "Pisaster ochraceus")
+
+pis <- subset_taxa(pisall, Phylum != "NA" & Phylum != "RCP2-54" & Phylum != "MBNT15") 
+
+pis_amp<-phyloseq_to_ampvis2(pis)
+
+pis_heatmap_all<- amp_heatmap(
+  pis_amp,
+  group_by = "ExtractionKitAbb", 
+  plot_values_size = 2, 
+  tax_show = 29,
+  showRemainingTaxa = FALSE,
+  round = 3,
+  order_y_by = rev(orderall),
+  order_x_by = c("Q.PSO","Q.BT","Q.BTQ","Q.PSP","ZYMO"),
+  min_abundance = 0.001,
+  color_vector = c("#A6CEE3", "whitesmoke","#E31A1C"))
+
+pis_hm_all <- pis_heatmap_all + theme_classic() + theme(legend.position = "bottom", legend.text = element_text(size = 8), legend.title = element_text(size =8), axis.text.x = element_text(angle = 30, hjust = 1, size = 8), plot.title = element_text(size = 10)) + labs(fill = "% Read \n Abun.", x = "Extraction Kit") + guides(fill = guide_colourbar(barheight = 1)) + ggtitle("B. Pisaster ochraceus")
+
+pis_kssresults_plots_all <-plot_grid(pis_hm_all,kss_pis_plotnl, align = "h", axis = "bt", rel_widths = c(1.5, 1.5))
+
+# ggsave("pis_kssresults_plots_all.pdf", pis_kssresults_plots_all, width = 8, height = 5, units = "in")
+
+#For our manuscript we only focus on the top 15 taxa 
+### top taxa plots ####
+
+topphyla<-c("Chloroflexi","Acidobacteriota","Firmicutes","Myxococcota","Patescibacteria","Campylobacterota","Actinobacteriota","Cyanobacteria","Planctomycetota","Desulfobacterota","Bdellovibrionota","Verrucomicrobiota","Bacteroidota","Spirochaetota","Proteobacteria")
+
+
+kss_summary_top <- kss_summary %>%
+  filter(Phylum != "Latescibacterota" & Phylum != "Crenarchaeota" & Phylum != "WPS-2" & Phylum != "Nitrospirota" & Phylum != "Calditrichota" & Phylum != "Fusobacteriota" & Phylum != "Gemmatimonadota" & Phylum != "Cloacimonadota" & Phylum != "Sva0485" & Phylum != "NB1-j" & Phylum != "Marinimicrobia_(SAR406_clade)" & Phylum != "SAR324_clade(Marine_group_B)"& Phylum != "Deinococcota" & Phylum != "Nanoarchaeota") 
+
+kss_summary_top$Phylum<-factor(kss_summary_top$Phylum, levels = topphyla)
+
+#Dermasterias
+kss_derm_plot_top<-ggplot(kss_summary_top[kss_summary_top$Species == "Dermasterias",], aes(x = LFC, y = Phylum, color = diff_abun)) + geom_point() + scale_color_manual(values = c("Black","Red")) + theme_classic() + theme(legend.position = "none", axis.text.x = element_text(size = 8), axis.title.x = element_text(size = 10), panel.border = element_rect(color = "black", size = 0.5, fill = NA)) + labs(color = "Significant", x= "Log fold change") + guides(color = guide_legend(nrow = 2)) + geom_vline(xintercept=0, linetype="dotted") + facet_grid(~Comparison)
+
+#no labels
+
+kss_derm_plotnl_top <- ggplot(kss_summary_top[kss_summary_top$Species == "Dermasterias",], aes(x = LFC, y = Phylum, color = diff_abun)) + geom_point() + scale_color_manual(values = c("Black","Red")) + theme_classic() + theme(legend.position = "bottom", axis.text.x = element_text(size = 8), axis.title.x = element_text(size = 10), axis.text.y = element_blank(), axis.title.y = element_blank(), panel.border = element_rect(color = "black", size = 0.5, fill = NA)) + labs(color = "Significant", x = "Log fold change") + geom_vline(xintercept=0, linetype="dotted") + geom_vline(xintercept=0, linetype="dotted") + facet_grid(~Comparison)
+
+#Figure 4A, right
+kss_derm_plotnl_top_noleg <- ggplot(kss_summary_top[kss_summary_top$Species == "Dermasterias",], aes(x = LFC, y = Phylum, color = diff_abun)) + geom_point() + scale_color_manual(values = c("Black","Red")) + theme_classic() + theme(legend.position = "none", axis.text.x = element_text(size = 8), axis.title.x = element_text(size = 10), axis.text.y = element_blank(), axis.title.y = element_blank(), panel.border = element_rect(color = "black", size = 0.5, fill = NA)) + labs(color = "Significant", x = "Log fold change") + geom_vline(xintercept=0, linetype="dotted") + geom_vline(xintercept=0, linetype="dotted") + facet_grid(~Comparison)
+
+#Figure 4A, left
+derm_heatmap_top<- amp_heatmap(
+  derm_amp,
+  group_by = "ExtractionKitAbb", 
+  plot_values_size = 2, 
+  tax_show = topphyla,
+  showRemainingTaxa = FALSE,
+  round = 3,
+  order_y_by = topphyla,
+  order_x_by = c("Q.PSO","Q.BT","Q.BTQ","Q.PSP","ZYMO"),
+  min_abundance = 0.001,
+  color_vector = c("#A6CEE3", "whitesmoke","#E31A1C"))
+
+derm_hm_top <- derm_heatmap_top + theme_classic() + theme(legend.position = "bottom", legend.text = element_text(size = 8), legend.title = element_text(size =8), axis.text.x = element_text(angle = 30, hjust = 1, size = 8), plot.title = element_text(size = 10)) + labs(fill = "% Read \n Abun.", x = "Extraction Kit") + guides(fill = guide_colourbar(barheight = 1)) + ggtitle("A. Dermasterias imbricata")
+
+#Figure 4A, left
+derm_hm_top_noleg <- derm_heatmap_top + theme_classic() + theme(legend.position = "none", axis.text.x = element_text(angle = 30, hjust = 1, size = 8), plot.title = element_text(size = 10)) + labs(fill = "% Read \n Abun.", x = "Extraction Kit") + guides(fill = guide_colourbar(barheight = 1)) + ggtitle("A. Dermasterias imbricata")
+
+#Figure 4A
+derm_kssresults_plots_top <-plot_grid(derm_hm_top,kss_derm_plotnl_top, align = "h", axis = "bt", rel_widths = c(1, 1.5))
+
+# ggsave("derm_kssresults_plots_top.pdf", derm_kssresults_plots_top, width = 8, height = 5, units = "in")
+
+#Pisaster
+
+kss_pis_plot_top<-ggplot(kss_summary_top[kss_summary_top$Species == "Pisaster",], aes(x = LFC, y = Phylum, color = diff_abun)) + geom_point() + scale_color_manual(values = c("Black","Red")) + theme_classic() + theme(legend.position = "none", axis.text.x = element_text(size = 8), axis.title.x = element_text(size = 10), panel.border = element_rect(size = 0.5, fill = NA, color = "black")) + labs(color = "Significant", x = "Log fold change") + guides(color = guide_legend(nrow = 2)) +  geom_vline(xintercept=0, linetype="dotted") + facet_grid(~Comparison)
+
+#no labels
+#Figure 4B, right
+kss_pis_plotnl_top <- ggplot(kss_summary_top[kss_summary_top$Species == "Pisaster",], aes(x = LFC, y = Phylum, color = diff_abun)) + geom_point() + scale_color_manual(values = c("Black","Red")) + theme_classic() + theme(legend.position = "bottom", axis.text.x = element_text(size = 8), axis.title.x = element_text(size = 10), axis.text.y = element_blank(), axis.title.y = element_blank(), panel.border = element_rect(size = 0.5, fill = NA, color = "black")) + labs(color = "Significant", x = "Log fold change") + geom_vline(xintercept=0, linetype="dotted") + facet_grid(~Comparison)
+
+
+pis_heatmap_top<- amp_heatmap(
+  pis_amp,
+  group_by = "ExtractionKitAbb", 
+  plot_values_size = 2, 
+  tax_show = topphyla,
+  showRemainingTaxa = FALSE,
+  round = 3,
+  order_y_by = rev(orderall),
+  order_x_by = c("Q.PSO","Q.BT","Q.BTQ","Q.PSP","ZYMO"),
+  min_abundance = 0.001,
+  color_vector = c("#A6CEE3", "whitesmoke","#E31A1C"))
+
+#Figure 4B, right
+pis_hm_top <- pis_heatmap_top + theme_classic() + theme(legend.position = "bottom", legend.text = element_text(size = 8), legend.title = element_text(size =8), axis.text.x = element_text(angle = 30, hjust = 1, size = 8), plot.title = element_text(size = 10)) + labs(fill = "% Read \n Abun.", x = "Extraction Kit") + guides(fill = guide_colourbar(barheight = 1)) + ggtitle("B. Pisaster ochraceus")
+
+#Figure 4B
+pis_kssresults_plots_top <-plot_grid(pis_hm_top,kss_pis_plotnl_top, align = "h", axis = "bt", rel_widths = c(1, 1.5))
+
+# ggsave("pis_kssresults_plots_top.pdf", pis_kssresults_plots_top, height = 5, width = 8, units = "in")
+
+derm_kssresults_plots_topnoleg <- plot_grid(derm_hm_top_noleg,kss_derm_plotnl_top_noleg, align = "h", axis = "bt", rel_widths = c(1, 1.5))
+
+#Figure 4
+plot_grid(derm_kssresults_plots_topnoleg, pis_kssresults_plots_top, align = "v", nrow = 2)
+
+#Figure 4
+da_results<-plot_grid(derm_kssresults_plots_topnoleg, pis_kssresults_plots_top , align = "v", nrow = 2, rel_heights = c(1,1.2))
+
+# ggsave("da_results_byspec.pdf",da_results, width = 8, height = 8, units = "in")
+
+```

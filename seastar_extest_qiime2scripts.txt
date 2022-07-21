@@ -1,0 +1,266 @@
+#First, if your MiSeq files were non-demultiplexed (forward.fastq, reverse.fastq, barcodes.fastq) you will have to import your reads into QIIME2 and then demultiplex.  Reads were often exported this way when using the custom EMP primers. After importing, you will not need to trim these since they have already had their primers removed in the demultiplexing process since the primers are in the sequencing primers (as far as i understand it). This same is not the case for samples that were sequenced using more standard illumina fusion primers (based on template from André Comeau from the Microbiome Helper paper). 
+
+source activate qiime2-2020.6
+
+#### IMPORT Sea star extraction test MiSeq Run 1 ####
+
+qiime tools import \
+   --type SampleData[PairedEndSequencesWithQuality] \
+   --input-path   /Volumes/Genomics-MiSeq/16S_SeaStar_Run20210616/Run20210616/Alignment_1/20210617_125058/Fastq/reads \
+   --output-path reads_qza/seastar_16SV4_20210616.qza \
+   --input-format CasavaOneEightSingleLanePerSampleDirFmt
+
+#### Summarize, Before Trimming ####
+qiime demux summarize \
+   --i-data reads_qza/seastar_16SV4_20210616.qza \
+   --o-visualization reads_qza/seastar_16SV4_20210616.qzv
+
+#### Trim primers (515F / 806R) ####
+qiime cutadapt trim-paired \
+   --i-demultiplexed-sequences reads_qza/seastar_16SV4_20210616.qza \
+   --p-cores 2 \
+   --p-front-f GTGYCAGCMGCCGCGGTAA \
+   --p-front-r GGACTACNVGGGTWTCTAAT \
+   --p-discard-untrimmed \
+   --p-no-indels \
+   --o-trimmed-sequences reads_qza/seastar_16SV4_20210616_trimmed.qza
+
+#### Summarize trimmed ####
+qiime demux summarize \
+   --i-data reads_qza/seastar_16SV4_20210616_trimmed.qza \
+   --o-visualization reads_qza/seastar_16SV4_20210616_trimmed.qzv
+
+
+#### Review summary and run dada2 ####
+
+qiime dada2 denoise-paired \
+    --i-demultiplexed-seqs reads_qza/seastar_16SV4_20210616_trimmed.qza \
+    --p-trunc-len-f 230 \
+    --p-trim-left-r 5 \
+    --p-trunc-len-r 210 \
+    --p-max-ee-f 3 \
+    --p-max-ee-r 5 \
+    --p-n-threads 2 \
+    --output-dir dada2_output
+
+#### Look at stats after dada2 ####
+qiime tools export --input-path dada2_output2/denoising_stats.qza --output-path dada2_output/
+
+qiime feature-table tabulate-seqs \
+  --i-data dada2_output/representative_sequences.qza \
+  --o-visualization dada2_output/rep-seqs.qzv
+
+qiime feature-table summarize \
+  --i-table dada2_output/table.qza \
+  --o-visualization dada2_output/table_summary.qzv \
+  --m-sample-metadata-file 16S_SeaStar_Run20210616_metadata.tsv
+
+#### Filter out rare ASVs -do this per run, before merging ####
+#Based on the above summary visualization you can choose a cut-off for how frequent a variant needs to be (and optionally how many samples need to have the variant) for it to be retained. One possible choice would be to remove all ASVs that have a frequency of less than 0.1% of the mean sample depth. This cut-off excludes ASVs that are likely due to MiSeq bleed-through between runs (reported by Illumina to be 0.1% of reads). To calculate this cut-off you would identify the mean sample depth in the above visualization, multiply it by 0.001, and round to the nearest integer.
+#For the seastar extraction test dataset, there are 2 peaks in sampling depth. Across the whole sample set, the average frequency per sample is 9887. But if you remove samples with reads less than 1000, the average sampling depth is 13080. 0.1% of the latter is 13 and the former is 10.
+
+qiime feature-table filter-features --i-table dada2_output/table.qza \
+    --p-min-frequency 10 \
+    --p-min-samples 2 \
+    --o-filtered-table dada2_output/table_filt.qza
+
+
+#Remove ASVs that were filtered out from the rep set sequences.
+
+
+qiime feature-table filter-seqs --i-data dada2_output/representative_sequences.qza \
+    --i-table dada2_output/table_filt.qza \
+    --o-filtered-data dada2_output/repseqs_filt.qza
+
+
+#The Sea Star library accidentally got rerun (this time with a V3 kit). Let’s process these data too.
+
+
+
+#### IMPORT Sea star rerun ####
+
+qiime tools import \
+   --type SampleData[PairedEndSequencesWithQuality] \
+   --input-path /mnt/MiSeq/16S_SeaStar_Re-Run20210726/Run20210726_requeued/Alignment_2/20210812_095711/Fastq \
+   --output-path /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/reads_qza/seastar_16SV4_20210726.qza \
+   --input-format CasavaOneEightSingleLanePerSampleDirFmt
+
+
+qiime cutadapt trim-paired \
+   --i-demultiplexed-sequences /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/reads_qza/seastar_16SV4_20210726.qza \
+   --p-cores 2 \
+   --p-front-f GTGYCAGCMGCCGCGGTAA \
+   --p-front-r GGACTACNVGGGTWTCTAAT \
+   --p-discard-untrimmed \
+   --p-no-indels \
+   --o-trimmed-sequences /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/reads_qza/seastar_16SV4_20210726_trimmed.qza
+
+#### Summarize, Before Trimming ####
+
+qiime demux summarize \
+   --i-data /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/reads_qza/seastar_16SV4_20210726.qza \
+   --o-visualization /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/reads_qza/seastar_16SV4_20210726.qzv
+
+
+#### Summarize, after primer removal ####
+qiime demux summarize \
+   --i-data /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/reads_qza/seastar_16SV4_20210726_trimmed.qza \
+   --o-visualization /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/reads_qza/seastar_16SV4_20210726_trimmed.qzv
+
+#Run dada2 with the trim settings for the v2 500 cycle kit library so that merged read lengths are the same
+
+qiime dada2 denoise-paired \
+    --i-demultiplexed-seqs /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/reads_qza/seastar_16SV4_20210726_trimmed.qza \
+    --p-trunc-len-f 230 \
+    --p-trim-left-r 5 \
+    --p-trunc-len-r 210 \
+    --p-max-ee-f 3 \
+    --p-max-ee-r 5 \
+    --p-n-threads 8 \
+    --output-dir /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/dada2_output3
+
+qiime feature-table tabulate-seqs \
+  --i-data /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/dada2_output3/representative_sequences.qza \
+  --o-visualization /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/dada2_output3/rep-seqs.qzv
+
+qiime feature-table summarize \
+  --i-table /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/dada2_output3/table.qza \
+  --o-visualization /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/dada2_output3/table_summary.qzv \
+  --m-sample-metadata-file /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/16S_SeaStar_Run20210616_metadata.tsv
+
+
+qiime tools export --input-path /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/dada2_output3/denoising_stats.qza --output-path /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/dada2_output3/
+
+#This dada2 has average sequences passing denoising = 72%. The original run (v2 kit, which had much higher quality) had 75% reads passing denoising. Ideal to have the same for merging of runs. Delete remaining trials (dada2_output, dada2_output2). 
+
+#### Filter out rare ASVs -do this per run, before merging ####
+#Based on the above summary visualization you can choose a cut-off for how frequent a variant needs to be (and optionally how many samples need to have the variant) for it to be retained. One possible choice would be to remove all ASVs that have a frequency of less than 0.1% of the mean sample depth. This cut-off excludes ASVs that are likely due to MiSeq bleed-through between runs (reported by Illumina to be 0.1% of reads). To calculate this cut-off you would identify the mean sample depth in the above visualization, multiply it by 0.001, and round to the nearest integer.
+#For the seastar extraction test dataset, there are 2 peaks in sampling depth. Across the whole sample set, the average frequency per sample is 9887. But if you remove samples with reads less than 1000, the average sampling depth is 13080. 0.1% of the latter is 13 and the former is 10.
+#For the second run the average frequency per sample is 267,628. If you remove samples with reads less than 10,000, the average is 325,569. So 0.1% of the former is 267 and of the latter is 325.  In the dataset as a whole, the mean frequency per feature is 486, while the median is 30. For the original run the mean was 53 and the median 5. 
+
+
+qiime feature-table filter-features --i-table dada2_output/table.qza \
+    --p-min-frequency 10 \
+    --p-min-samples 2 \
+    --o-filtered-table dada2_output/table_filt.qza
+
+#ReRun
+qiime feature-table filter-features --i-table /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/dada2_output3/table.qza \
+    --p-min-frequency 267 \
+    --p-min-samples 2 \
+    --o-filtered-table /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/dada2_output3/table_filt.qza
+
+
+Remove ASVs that were filtered out.
+
+
+qiime feature-table filter-seqs --i-data dada2_output/representative_sequences.qza \
+    --i-table dada2_output/table_filt.qza \
+    --o-filtered-data dada2_output/repseqs_filt.qza
+
+qiime feature-table filter-seqs --i-data /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/dada2_output3/representative_sequences.qza \
+    --i-table /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/dada2_output3/table_filt.qza \
+    --o-filtered-data /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/dada2_output3/repseqs_filt.qza
+
+#### Summary for filtered table ####
+#Run 2
+qiime feature-table summarize \
+  --i-table  /Volumes/Genomics-Processed/ckellogg/16SV4_SeaStarRerun_20210726_processed/dada2_output3/table_filt.qza \
+  --o-visualization /Volumes/Genomics-Processed/ckellogg/16SV4_SeaStarRerun_20210726_processed/dada2_output3/filt_table_summary.qzv \
+  --m-sample-metadata-file /Volumes/Genomics-Processed/ckellogg/16SV4_SeaStarRerun_20210726_processed/16S_SeaStar_Run20210616_metadata.tsv
+
+#Run 1
+qiime feature-table summarize \
+  --i-table   /Users/colleen.kellogg/Documents/hakai_seastar/ext_trial/dada2_output/table_filt.qza \
+  --o-visualization  /Users/colleen.kellogg/Documents/hakai_seastar/ext_trial/dada2_output/filt_table_summary.qzv \
+  --m-sample-metadata-file  /Users/colleen.kellogg/Documents/hakai_seastar/ext_trial/16S_SeaStar_Run20210616_metadata.tsv
+
+#### Now, merge the runs ####
+mkdir /mnt/Processed/ckellogg/seastar_extest_merged
+
+qiime feature-table merge \
+--i-tables /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/dada2_output3/table_filt.qza \
+--i-tables /mnt/Processed/ckellogg/16SV4_SeaStar_20210616/table_filt.qza \
+--p-overlap-method sum \ #we choose 'sum' since these libraries are identical, just run twice using two different MiSeq kits
+--o-merged-table /mnt/Processed/ckellogg/seastar_extest_merged/16SV4_SeaStar_mergedtable.qza
+
+
+qiime feature-table merge-seqs \
+--i-data /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/dada2_output3/repseqs_filt.qza \
+--i-data /mnt/Processed/ckellogg/16SV4_SeaStar_20210616/repseqs_filt.qza \
+--o-merged-data /mnt/Processed/ckellogg/seastar_extest_merged/16SV4_SeaStar_mergedrepseqs.qza
+
+#### Summarize Merged Feature Table and Rep Seqs ####
+qiime feature-table summarize \
+--i-table /mnt/Processed/ckellogg/seastar_extest_merged/16SV4_SeaStar_mergedtable.qza \
+--o-visualization /mnt/Processed/ckellogg/seastar_extest_merged/16SV4_SeaStar_summary.qzv \
+--m-sample-metadata-file /mnt/Processed/ckellogg/16SV4_SeaStarRerun_20210726/16S_SeaStar_Run20210616_metadata.tsv
+
+
+qiime feature-table tabulate-seqs \
+  --i-data /mnt/Processed/ckellogg/seastar_extest_merged/16SV4_SeaStar_mergedrepseqs.qza \
+  --o-visualization /mnt/Processed/ckellogg/seastar_extest_merged/16SV4_SeaStar_mergedrepseqs.qzv
+
+
+#### Classify reads ####
+
+qiime feature-classifier classify-sklearn \
+    --i-reads /mnt/Processed/ckellogg/seastar_extest_merged/16SV4_SeaStar_mergedrepseqs.qza \
+    --i-classifier silvadb_138_1/silva-138-1-ssu-nr99-515f-806r-classifier.qza \
+    --p-n-jobs 8 \
+    --output-dir /mnt/Processed/ckellogg/seastar_extest_merged/taxa_sklearn
+
+#### What if I classify using BLAST #####
+qiime feature-classifier classify-consensus-blast --i-query /mnt/Processed/ckellogg/16SV4_SeaStar_20210616/repseqs_filt.qza \
+    --i-reference-reads silvadb_138_1/silva-138-1-ssu-nr99-seqs-515f-806r-uniq.qza \
+    --i-reference-taxonomy silvadb_138_1/silva-138-1-ssu-nr99-tax-515f-806r-derep-uniq.qza \
+    --o-classification /mnt/Processed/ckellogg/16SV4_SeaStar_20210616/repseqs_filt_BLASTID.qza
+
+qiime feature-classifier classify-consensus-blast --i-query /mnt/Processed/ckellogg/seastar_extest_merged/16SV4_SeaStar_mergedrepseqs.qza  \
+    --i-reference-reads silvadb_138_1/silva-138-1-ssu-nr99-seqs-515f-806r-uniq.qza \
+    --i-reference-taxonomy silvadb_138_1/silva-138-1-ssu-nr99-tax-515f-806r-derep-uniq.qza \
+    --p-perc-identity 0.7 \
+    --o-classification /mnt/Processed/ckellogg/seastar_extest_merged/16SV4_SeaStar_repseqs_BLASTID70.qza
+
+
+#### Filter chloroplasts and mitochondria from feature table ####
+
+qiime taxa filter-table \
+  --i-table /mnt/Processed/ckellogg/seastar_extest_merged/16SV4_SeaStar_mergedtable.qza \
+  --i-taxonomy /mnt/Processed/ckellogg/seastar_extest_merged/taxa_sklearn/classification.qza \
+  --p-exclude mitochondria,chloroplast,eukaryota \
+  --o-filtered-table /mnt/Processed/ckellogg/seastar_extest_merged/seastar_16SV4_extest_table_NCM.qza
+
+#And from Rep Seqs
+qiime taxa filter-seqs --i-sequences /mnt/Processed/ckellogg/seastar_extest_merged/16SV4_SeaStar_mergedrepseqs.qza \
+  --i-taxonomy /mnt/Processed/ckellogg/seastar_extest_merged/taxa_sklearn/classification.qza \
+  --p-exclude mitochondria,chloroplast,eukaryota \
+  --o-filtered-sequences /mnt/Processed/ckellogg/seastar_extest_merged/16SV4_SeaStar_mergedrepseqs_NCM.qza
+
+
+
+#### Do some exporting ####
+qiime tools export --input-path /mnt/Processed/ckellogg/seastar_extest_merged/seastar_16SV4_extest_table_NCM.qza --output-path /mnt/Processed/ckellogg/seastar_extest_merged/exported/
+
+
+qiime tools export --input-path /mnt/Processed/ckellogg/seastar_extest_merged/16SV4_SeaStar_mergedrepseqs_NCM.qza --output-path /mnt/Processed/ckellogg/seastar_extest_merged/exported/
+
+
+qiime tools export --input-path /mnt/Processed/ckellogg/seastar_extest_merged/taxa_sklearn/classification.qza --output-path /mnt/Processed/ckellogg/seastar_extest_merged/exported/
+
+
+qiime tools export --input-path /mnt/Processed/ckellogg/seastar_extest_merged/16SV4_SeaStar_repseqs_BLASTID.qza --output-path /mnt/Processed/ckellogg/seastar_extest_merged/export/taxa_consensusblast/
+
+
+qiime tools export --input-path /mnt/Processed/ckellogg/seastar_extest_merged/16SV4_SeaStar_repseqs_BLASTID70.qza --output-path /mnt/Processed/ckellogg/seastar_extest_merged/taxa_consensusblast70/
+
+
+#### Make BIOM file ####
+
+#Change the taxonomy header so that it is as follows:
+#OTUID    taxonomy    confidence
+
+biom add-metadata -i /mnt/Processed/ckellogg/seastar_extest_merged/exported/feature-table.biom -o /mnt/Processed/ckellogg/seastar_extest_merged/exported/feature-table-tax.biom --observation-metadata-fp /mnt/Processed/ckellogg/seastar_extest_merged/exported/taxonomy.tsv --sc-separated taxonomy
+
+biom convert -i /mnt/Processed/ckellogg/seastar_extest_merged/exported/feature-table-tax.biom -o /mnt/Processed/ckellogg/seastar_extest_merged/exported/seastar_16SV4_extest_NCMasvtable_tax.tsv --to-tsv --header-key taxonomy
+
