@@ -5,4 +5,4 @@ Here we provide the scripts and data files to reproduce analyses for a project c
 
 Bioinformatic process of these data largely employed QIIME2 and are detailed in the file `seastar_extest_qiime2scripts.txt`.
 
-Data visualization and statistical tests were performed in R. The bulk of the analyses are available in `seastar_analysis_visualizations_clean.Rmd`.
+Data visualization and statistical tests were performed in R. The bulk of the analyses are available in `Sea Star 16S Analysis and Visualizations.Rmd`.
